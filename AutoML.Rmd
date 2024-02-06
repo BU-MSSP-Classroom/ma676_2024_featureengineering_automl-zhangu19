@@ -1,0 +1,842 @@
+---
+title: "Auto ML vs Feature Engineering"
+author: "Masanao Yajima"
+date: "2023-01-05"
+output: html_document
+---
+
+```{css,echo=FALSE}
+.btn {
+    border-width: 0 0px 0px 0px;
+    font-weight: normal;
+    text-transform: ;
+}
+
+.btn-default {
+    color: #2ecc71;
+    background-color: #ffffff;
+    border-color: #ffffff;
+}
+```
+
+```{r,echo=FALSE}
+# Global parameter
+show_code <- TRUE
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,message=FALSE,fig.align="center",fig.width=7,fig.height=7)
+pacman::p_load(
+       car
+      , arm
+      , mi
+      , mice
+      , mvtnorm
+      , dplyr
+      , GGally
+      , ggplot2
+      , ggExtra
+      , reshape2
+      , corrplot
+      , RColorBrewer
+      , lubridate
+      , AmesHousing
+      , tidymodels
+      )
+```
+
+# Class Workbook {.tabset .tabset-fade .tabset-pills}
+
+## Ames Housing data
+
+We will look at the Ames Housing data.  The task is to predict the houses after 2008 based on data up to 2008.
+```{r}
+library(AmesHousing)
+data(ames_raw,package = "AmesHousing")
+ames_raw_2008=ames_raw[ames_raw$`Yr Sold`<2008,]
+ames_raw_2009=ames_raw[ames_raw$`Yr Sold`>=2008,]
+```
+
+The loss will be the same as before. If your algorithm decides to pay more than the actual price your company buys. If the predicted price is lower, your company will fail to buy.
+
+- If you bought for more than the actual value, you’ve overpaid.
+- If you bid less and lost, you lost a profit of 10% of the house price.
+
+```{r,echo=show_code}
+calc_loss<-function(prediction,actual){
+  difpred <- actual-prediction
+  RMSE <-sqrt(mean(difpred^2))
+  operation_loss<-abs(sum(difpred[difpred<0]))+sum(0.1*actual[difpred>0])
+  return(
+    list(RMSE,operation_loss
+         )
+  )
+}
+```
+
+## Feature engineering
+
+### Types of Feature engineering
+There are several categories of feature engineering.  
+
+1. Adding information from other sources
+2. Missing Data Handling 
+3. Dealing with problematic values (outliers, inliers, etc)
+4. Making variables that make sense for the context
+5. Transformation 
+6. Scaling
+7. Discretization
+
+### 1. Adding information from other sources
+
+When handed a dataset, it's easy to jump right into the analysis.  This is typical behavior, especially for a novice.  However, there is often information that could be explored if you know what you are looking for.  There are a few categories of such information.
+
+a) Information that was not given to you but someone has access to.
+
+When you are not the data creator, sometimes you are not given access to certain information.  The most common is information that pertains to privacy or protected attributes.  This information is often not given to you for reasons external to the project you are working on.  However, in certain circumstances, if you know what you are looking for, you might be able to negotiate information that could save you some headaches down the line. Think outside the box and be creative.  The important caveat is that obtaining some information could have legal consequences.  Web scraping and other means of data collection should be done with care.  Some industry such as pharmacies have strict rule that prohibits the use of pharmacy information for their retail purpose.  
+
+b) Information that is public but you need to obtain.
+
+There are information about places and things on the internet that are easy to incorporate.
+For example, in housing data, geographic information could be tied to census information.  Financial information might require adjusting for inflation, which again can be found on the internet.  Other survey information might be available if you care to look for them.  One thing to be careful is that not all information that you can find will be useful.  You need to balance the time needed vs the benefit of the information.
+
+c) Information that is confusing for machines
+
+Coded variables without keys do not make sense but for a computer they seem like a numeric variable.  If not careful, one might include them as numeric.  Take `MS SubClass`, which codes the building class.
+
+```{r}
+table(ames_raw$`MS SubClass`)
+```
+
+Unfortunately, the help file does not contain detailed information on the codes.  But with some research you will be able to [find](https://github.com/zzeniale/Ames-housing-price-prediction) that codes do not have ordering to them.  Therefore, you need to think carefully about what matters and then discretize the variable in some ways.
+
+  - 20 1-STORY 1946 & NEWER ALL STYLES
+  - 30 1-STORY 1945 & OLDER
+  - 40 1-STORY W/FINISHED ATTIC ALL AGES
+  - 45 1-1/2 STORY - UNFINISHED ALL AGES
+  - 50 1-1/2 STORY FINISHED ALL AGES
+  - 60 2-STORY 1946 & NEWER
+  - 70 2-STORY 1945 & OLDER
+  - 75 2-1/2 STORY ALL AGES
+  - 80 SPLIT OR MULTI-LEVEL
+  - 85 SPLIT FOYER
+  - 90 DUPLEX - ALL STYLES AND AGES
+  - 120 1-STORY PUD (Planned Unit Development) - 1946 & NEWER
+  - 150 1-1/2 STORY PUD - ALL AGES
+  - 160 2-STORY PUD - 1946 & NEWER
+  - 180 PUD - MULTILEVEL - INCL SPLIT LEV/FOYER
+  - 190 2 FAMILY CONVERSION - ALL STYLES AND AGES
+
+### 2. Missing Data Handling 
+
+To handle missing data, it's always essential to consider the context.  Data that is missing is not by themselves a problem.  The fundamental problem is the bias that these variable might pose down the line if incorporated.  Doing a careful imputation takes effort.  When time is of a concern, deleting variables with high rate of missingness should be considered.
+
+a) Missing data that is not really missing
+Variable such as `Garage Yr Blt` has 159 observations missing.  But if you look carefully, you will realize that the houses that are missing this information are the ones that have no garage.  This is not missing data but a coding problem.  One must decide what to do with such information based on the context.  You should not fill such missingness with some arbitrary number.
+
+```{r}
+table(ames_raw$`Garage Cars`,is.na(ames_raw$`Garage Yr Blt`))
+```
+
+b) Missing data that is too big
+Some variables might have too much missing data, and there may be a good reason for that.  If there are ways to craft a variable that could serve as a proxy for such information, one should try.  But if such effort introduces additional uncertainty, one might remove the variable altogether.  
+
+```{r}
+missing_data_proportion<-colMeans(is.na(ames_raw))
+plot(missing_data_proportion)
+which(missing_data_proportion>0.1) 
+```
+
+c) Missing data that could be an additional information
+
+If missingness is intentional, one might add a variable to signify such missingness.  You will need to fill the missing value with some value, which depends on the variable.
+
+d) Missing completely at random (MCAR)
+
+If MCAR, one could remove the rows with missingness without introducing bias.  However, this is a strong assumption that is often not met in practice.
+
+e) Missing at Random (MAR)
+
+For MAR, regression-based imputation often is used.  Many packages allow you to do these imputations reasonably easily.  However, one thing that you will need to think about is that some imputation method will work better after transformation then before.  This will rely on the model being used to impute.  See `mi`, `mice`, etc for detail.
+
+f) Missing not at random (MNAR)
+
+MNAR variable is hard to deal with. One needs to weigh the cost and benefit of including such variables.  An example of such is a variable like income.  If all the low-income people are not responding, one might use a small number as a proxy.  But if there are reasons to believe there multiple categories of cause they are missing, and there is no way to tell, then you might be better off removing the variable.
+
+
+### 3. Dealing with problematic values (outliers, inliers, etc)
+
+Problematic observations such as outliers are hard to find and often require you to revisit this step a few times.  This is important because you must deal with them before applying transformations.  For example, outliers would distort statistics such as means which would be problematic if you plan to use z-score transformation.  When you have a lot of zeros, this could impact how you want to transform a variable.  EDA often finds outliers, but they may not pop up until the modeling phase.  Truncating or removing data with outliers should be done with caution since they often introduce an unwanted feature in the data.
+
+Here is an illustration of two types of outliers that are harder and easier to find.
+
+```{r, fig.width=12, fig.height=4}
+dat<-rmvnorm(100,c(0,0),matrix(c(3,2,2,3),2,2))
+dat<-rbind(dat,c(7,7), c(-3,4))
+par(mfrow=c(1,3))
+plot(dat[,1],dat[,2],col=c(rep(1,100),2,4))
+plot(dat[,1],col=c(rep(1,100),2,4));
+plot(dat[,2],col=c(rep(1,100),2,4))
+```
+
+
+Look at the basement and the 2nd floor Square footage, you can see that there are bimodality as well as properties that have outliers.  This should make you cautious of performing scaling to these variables.
+```{r}
+ plot(ames_raw$`Bsmt Unf SF`,ames_raw$`2nd Flr SF`)
+```
+
+
+### 4. Making variables that make sense for the context
+
+Context matters when doing feature engineering.  Take, for example, the Ames housing data.  Ames is a university town where many people have some ties to the university of Iowa.  Therefore, looking at things like distance from the university might make sense to include in the analysis.  Another thing to think about is things like the Year built. The impact of the year built is not absolute and shifts over the years.  Therefore one might want to make a variable that is the age of the house at sales.   
+
+
+```{r}
+# handling Year features
+ames_raw$yrs_since_remod <- ames_raw$`Yr Sold` - ames_raw$`Year Remod/Add`
+
+# Total Living Area
+ames_raw$TotalArea <- ames_raw$`Gr Liv Area` + ames_raw$`Total Bsmt SF`
+
+# TotalBath
+ames_raw$TotalBath <- ames_raw$`Bsmt Full Bath` + 0.5 * ames_raw$`Bsmt Half Bath` + ames_raw$`Full Bath` + 0.5 * ames_raw$`Half Bath`
+```
+
+
+
+### 5. Transformation 
+
+When the predictor is right skewed they tend to distort the linear model by exhibiting leverage points.  Taking a log will resolve such a problem.
+
+```{r,fig.width=7,fig.height=4,echo=show_code}
+p=ggplot(ames_raw)+geom_point()+aes(x=`Gr Liv Area`,y=SalePrice)+xlab("Above grade (ground) living area square feet")+ylab("Sale Price")+geom_smooth(method="lm",se=FALSE)
+p2 <- ggMarginal(p, margins = 'both', fill="skyblue", size=4,type="histogram")
+
+
+p4=ggplot(ames_raw)+geom_point()+aes(x=`Gr Liv Area`,y=SalePrice)+xlab("Above grade (ground) living area square feet")+ylab("Sale Price")+geom_smooth(method="lm",se=FALSE)+scale_y_log10()+scale_x_log10()
+p3 <- ggMarginal(p4, margins = 'both', fill="skyblue", size=4,type="histogram")
+
+gridExtra::grid.arrange(p2,p3,ncol=2)
+```
+
+
+### 6. Scaling, centering and normalizing.
+
+For linear regression models, centering and scaling does not change the model itself, but they change the interpretability of the model coefficients. Converting all the predictors on a similar scale has its advantage because the size of the coefficient will directly indicate the influence of the predictor. For some hierarchical models, scaling will also help with the convergence problem. But scaling is critical for all the distance-based methods you will encounter later in the semester.  
+
+### 7. Discretization
+
+Categorical variables need to be coded appropriately.  Dummy coding or one-hot-encoding is one way when the information is nominal.  Take, for example, the building type variable by default, it's a character variable with five values.
+```{r}
+table(ames_raw$`Bldg Type`)
+```
+
+One can use contextual information to convert them into meaningful variables like a single family and multiple families or a shared house.  Or use factor, which will, by default, make a dummy coding.
+```{r}
+ames_raw$BldgTypeFact<-factor(ames_raw$`Bldg Type`)
+head(model.matrix(~BldgTypeFact,ames_raw))
+```
+By default, R will convert the factors into a dummy, with the first level being the baseline.  It's essential to know how a dummy variable is included in a model as it is model specific.
+
+
+### 8. Grouping 
+
+Not all categorical variable needs a unique category.  One might consider grouping some categories so that you have fewer categories to model.
+For example, the overall condition is rated from 1 to 10, as shown below.
+```{r}
+ggplot(ames_raw)+geom_histogram()+aes(x=`Overall Cond`)
+```
+
+It's important to know which way is better.  For the Ames data it is infact
+  10 Very Excellent
+  9 Excellent
+  8 Very Good
+  7 Good
+  6 Above Average
+  5 Average
+  4 Below Average
+  3 Fair
+  2 Poor
+  1 Very Poor
+
+One could convert them into integers since there is explicit ordering.  However, the distribution of the variable is uneven, with many observations at five and very few below 5.  In such a case, combining the categories into three may be better since the data does not seem to have the resolution to understand the ten levels.
+
+```{r}
+ames_raw$OverallCond3 <- ifelse( ames_raw$`Overall Cond` >5, 3, ifelse( ames_raw$`Overall Cond`<5, 1, 2))
+ggplot(ames_raw)+geom_histogram()+aes(x=OverallCond3)
+```
+
+
+
+### 9. Selecting and compressing
+
+There are various reasons why you need to be selective of what to include.  This could be the lack of information from the variable due to the limitations posed by the sample size, contextual reasons, or overlapping information.  
+
+- If there is very small variability in some variable, it's very unlikely that you will get some differetiating information out of them.
+
+For highly correlated variables you might select variables so that correlation does not impact the model building.  
+```{r}
+# Correlation matrix
+numeric_vars = ames_raw %>% select(where(is.numeric)) 
+ggcorr(numeric_vars,hjust = 1)
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+```
+
+Alternatively, you could compress the correlated variable using dimension reduction.  However, it's no free lunch since you need to do all the scaling and missing data processing before you can apply PCA and you need to decide how many components to include.  pcaMethods package offers a way to fit a model even in the presence of missing data.
+
+```{r}
+BiocManager::install("pcaMethods")
+library(pcaMethods)
+
+pca_numeric<-pcaMethods::pca(numeric_vars,nPcs=20,scale="uv")
+summary(pca_numeric)
+plot(pca_numeric)
+slplot(pca_numeric)
+```
+
+### Tidymodels
+
+In tidymodels package there is a feature engineering method called `recipes`.
+It used to be it's own package but now they have murged the packages.
+You can find the example for Ames Housing here:
+https://www.tmwr.org/recipes
+
+Doing things like 
+- Take log of `Gr_Liv_Area`
+- Make `Neighborhood` that is less than 1% prevalent into "other" 
+- Dummy code all the nominal predictors
+
+Can be easily done as
+
+```{r}
+library(tidymodels)
+simple_ames <- 
+  recipe(SalePrice ~ Neighborhood + `Gr Liv Area` + `Year Built` + `Bldg Type`,
+         data = ames_raw) %>%
+  step_log(`Gr Liv Area`, base = 10) %>% 
+  step_other(Neighborhood, threshold = 0.01) %>% 
+  step_dummy(all_nominal_predictors())
+```
+
+However, this is not executed.
+You will use the framework of tidymodel workflow, which will run these transformation when fitting the model.
+
+
+## In class work
+### Model fitting
+
+Since you've worked on it in MA679 please copy and paste your best model here.  
+```{r,echo=TRUE}
+##
+##
+```
+
+Your answer:
+
+~~~
+Please write your answer in full sentences.
+
+
+~~~
+
+Please perform feature engineering on the Ames housing data that you think will help with the prediction.
+
+```{r,echo=TRUE}
+##
+##
+```
+
+Your answer:
+
+~~~
+Please write your answer in full sentences.
+
+
+~~~
+
+Compare the result before and after the feature engineering step.
+
+```{r,echo=TRUE}
+##
+##
+```
+
+
+Your answer:
+
+~~~
+Please write your answer in full sentences.
+
+
+~~~
+
+## AutoML 
+
+Feature engineering is mostly about context.  But does it matter if the prediction is of interest?  Is there automatic ways to do all of this that is better?  Let's find out.
+
+Include all the vairables you included as well as anything you want to add to the model.
+```{r}
+vars <- c("SalePrice","Lot Area","Gr Liv Area","Full Bath")
+#vars <- c("SalePrice")#
+```
+
+
+```{r}
+train <- ames_raw_2008[, vars]
+test  <- ames_raw_2009[, vars]
+colnames(train) <- make.names(colnames(train))
+colnames(test)  <- make.names(colnames(test))
+
+# mlr3 TaskRegr
+train$SalePrice <- log(train$SalePrice)
+test$SalePrice <- log(test$SalePrice)
+
+```
+
+### AutoML with MLR3
+
+MLR3 has an auto ML.  
+https://github.com/a-hanf/mlr3automl/blob/master/vignettes/mlr3automl.md
+https://a-hanf.github.io/useR_presentation/useR_2021_mlr3automl.pdf
+
+You will need to install
+```{r,eval=FALSE}
+devtools::install_github('https://github.com/mlr-org/mlr3extralearners')
+devtools::install_github('https://github.com/a-hanf/mlr3automl', dependencies = TRUE)
+```
+
+```{r,eval=FALSE}
+# load packages and data
+library(mlr3)
+library(mlr3learners)
+library(mlr3automl)
+
+# Create a task
+task <- as_task_regr(train, target ="SalePrice",id = "ames_raw")
+
+# Auto ML
+ames_model = AutoML(task)
+train_indices = sample(1:task$nrow, 2/3*task$nrow)
+ames_model$train(row_ids = train_indices)
+
+predict_indices = setdiff(1:task$nrow, train_indices)
+predictions = ames_model$predict(row_ids = predict_indices)
+plot(predictions$response,predictions$truth);abline(0,1)
+resampling_result = ames_model$resample()
+iml_explainer = ames_model$explain(iml_package = "iml")
+iml_pdp = iml::FeatureEffect$new(iml_explainer, feature="Lot.Area",  method="pdp")
+plot(iml_pdp)
+```
+
+### H2O autoML
+
+h2o autoML is well known in the field as something pretty powerful.
+https://docs.h2o.ai/h2o/latest-stable/h2o-docs/automl.html
+```{r,eval=FALSE}
+# load packages and data
+library(h2o)
+
+# init h2o
+h2o.init()
+h2o.no_progress()
+
+# upload the data
+train_hf <- as.h2o(train)
+test_hf <- as.h2o(test)
+
+# fit a model
+automl <- h2o.automl(y = "SalePrice", training_frame = train_hf, max_runtime_secs = 300)
+model <- automl@leader
+predictions=h2o.predict(model,newdata = test_hf)
+plot( as.vector(predictions$predict),as.vector(test_hf$SalePrice));abline(0,1)
+cor( as.vector(predictions$predict),as.vector(test_hf$SalePrice))
+
+# shutdown h2o
+
+h2o.shutdown(prompt =F) 
+```
+
+### automl
+
+From CRAN:
+Fits from simple regression to highly customizable deep neural networks either with gradient descent or metaheuristic, using automatic hyper parameters tuning and custom cost function. A mix inspired by the common tricks on Deep Learning and Particle Swarm Optimization.
+
+https://cran.r-project.org/web/packages/automl/index.html
+
+```{r,eval=FALSE}
+library(automl)
+amlmodel = automl_train_manual(Xref = train,
+                               Yref = train$SalePrice
+                               %>% as.numeric(),
+                               hpar = list(learningrate = 0.01,
+                               minibatchsize = 2^2,
+                               numiterations = 600))
+prediction = automl_predict(model = amlmodel, X = test) 
+plot(prediction,test$SalePrice);abline(0,1)
+```
+
+
+### autoxgboost
+
+XG Boost is a popular implementation of gradient boosting method that we will talk about in MA679.  Leaving aside the detail, it's another popular ML method that has a lot of tuning parameters.  AutoXGBoost is a function that would search for good choice of these parameters automaticall.
+
+```{r,eval=FALSE}
+# load library
+devtools::install_github("ja-thomas/autoxgboost")
+library(autoxgboost)
+# create a classification task
+trainTask = makeRegrTask(data = train, target = "SalePrice")
+# create a control object for optimizer
+ctrl = makeMBOControl()
+ctrl = setMBOControlTermination(ctrl, iters = 5L) 
+# fit the model
+res = autoxgboost(trainTask, control = ctrl, tune.threshold = FALSE)
+# do prediction and print confusion matrix
+prediction = predict(res, test)
+plot(prediction$data[,1],prediction$data[,2]);abline(0,1)
+#caret::confusionMatrix(test$Species, prediction$data$response)
+```
+
+### forester
+
+Forester is similar to Autoxgboost in a way it fits tree based models automatically. They can fit xgboost as well as it's cousins like catboost.
+
+```{r,eval=FALSE}
+#install.packages("devtools")
+#devtools::install_github("ModelOriented/forester")
+library(forester)
+best_model <- forester::train(data = train, 
+                       y = "SalePrice", 
+                       type = "auto")
+```
+
+
+
+## Missing Data
+
+### Working with Missing Data
+
+#### NA and other types
+
+In R, missing data is represented using `NA`.  But other closely related values are treated the same in some applications.  You can read about it in detail [here](https://www.r-bloggers.com/2018/07/r-null-values-null-na-nan-inf/).
+
+```{r}
+?NA
+?NULL
+?NaN
+?Inf
+```
+
+You need to be careful how the data is represented as missing in the original data and perform appropriate conversions.
+
+Since NA is not a number, you need to use is.na() to find out if a value is NA or not.
+```{r}
+x<-c(1,2,NA,3,4,NA)
+is.na(x)
+```
+
+If you want to know the elements that are not NA you can add !
+```{r}
+!is.na(x)
+```
+
+
+
+#### Some easy handling of NA
+
+The problem with NA is that it's a logical value but without a definition of operations.  Simple functions like mean and medians will all return NA if you have any NA in the vector.
+
+```{r}
+x<-c(rnorm(10),NA)
+mean(x)
+median(x)
+```
+
+You can remove NA and calculate these values manually.  But for base R functions, there is a parameter `na.rm` that does the same for you.
+
+```{r}
+mean(x,na.rm = T)
+mean(x[!is.na(x)])
+
+median(x,na.rm = T)
+median(x[!is.na(x)])
+```
+
+
+### Types of analysis
+
+- Available case analysis: is when you use the data based on their availability.
+- Complete case analysis: is when you remove all the rows that has any missingness.
+
+#### What does R do when you have missing data?
+
+R does available case analysis by default.
+
+Let's generate fake x and y and creat a missing version of x.
+```{r}
+x <- rnorm(100)
+y <- 1+1.4*x+rnorm(100)
+xmiss<-x
+xmiss[sample(1:100,10)]<-NA
+```
+
+Compare the results.
+```{r}
+display(lm(y~x))
+display(lm(y~xmiss))
+```
+How about using more than one predictor?
+```{r}
+x1<-rnorm(100)
+x2<-rnorm(100)
+y12<-1+1.4*x1-0.4*x2+rnorm(100)
+x1miss<-x1
+x2miss<-x2
+x1miss[1:10] <-NA
+x2miss[11:20]<-NA
+
+```
+
+```{r}
+display(lm(y12~x1+x2))
+display(lm(y12~x1miss+x2miss))
+display(lm(y12~x1))
+display(lm(y12~x1miss))
+
+```
+
+#### What does ggplot do with NA?
+
+```{r,fig.width=12,fig.height=3,out.width="98%"}
+x<-c(rpois(1000,50),rep(0,100))
+logx_na<-ifelse(log(x)==-Inf,NA,log(x))
+gp1=ggplot(data.frame(x))+geom_histogram()+aes(x=x)
+gp2=ggplot(data.frame(x))+geom_histogram()+aes(x=log(x))
+gp3=ggplot(data.frame(x))+geom_histogram()+aes(x=logx_na)
+gp4=ggplot(data.frame(x))+geom_histogram()+aes(x=log(x+1))
+gridExtra::grid.arrange(gp1,gp2,gp3,gp4,ncol=4)
+```
+
+
+
+### Missing Data Mechanisms
+
+Three Missing Data Mechanisms
+
+- Missing Completely at Random (MCAR): Missing data can be regarded as a simple random sample of the complete data.
+- Missing At Random (MAR): Missingness is related to the observed data but not on the missing data
+- Missing Not At Random (MNAR):  Missingness is related to the missing values them selves.
+
+MCAR mechanism
+```{r}
+x <- rnorm(100)
+y <- 1+1.4*x+rnorm(100)
+```
+
+
+### Visualizing
+
+When you have missing observations, it helps to understand the extent of missingness.
+
+```{r}
+library(naniar)
+vis_miss(riskfactors)
+```
+
+If the missingness is too severe, you should first question the use of that variable.  
+
+The next step in the visual assessment will be to see if there are specific patterns in the way data are missing.  You will see these patterns when a group of questions are all related to the same issue.
+
+```{r}
+library(UpSetR)
+gg_miss_upset(riskfactors)
+```
+
+You can further drill down on the pattern of missings in each column, broken down by a categorical variable from the dataset using `gg_miss_fct`. 
+```{r}
+gg_miss_fct(x = riskfactors, fct = marital)
+```
+
+When GGPlot ignores the NAs, you can add them back using `geom_miss_point`. This allows you to see if there is a pattern in the missing data that varies by covariates.
+
+```{r,fig.width=6,fig.height=4,out.width="98%"}
+x<-rnorm(1000)
+y<- c(rnorm(900),rep(NA,100))
+ggplot(data.frame(x))+geom_point()+aes(x=x,y=y)
+ggplot(data.frame(x))+geom_point()+aes(x=x,y=y)+geom_miss_point()
+```
+
+ Note that where the NAs are plotted is a little concerning since it's arbitrary and often leads to confusion. But at the exploration phase, it's better than ignoring them.  
+
+### Simple Imputation strategies
+
+```{r}
+x <- rnorm(100)
+xmiss<-x
+xmiss[sample(1:100,10)]<-NA
+```
+
+Mean imputation
+```{r}
+x_imp_mean <- xmiss
+x_imp_mean[is.na(x_imp_mean)]<-mean(x_imp_mean,na.rm=TRUE)
+x_imp_median <- xmiss
+x_imp_median[is.na(x_imp_mean)]<-median(x_imp_mean,na.rm=TRUE)
+```
+
+Last value carried forward
+```{r}
+na.locf <- function(x) {
+  v <- !is.na(x)
+  c(NA, x[v])[cumsum(v)+1]
+}
+x_imp_lvcf<-na.locf(xmiss)
+```
+
+Indicator for missing ness + mean imputation
+```{r}
+x_imp_mean <- xmiss
+x_imp_mean[is.na(x_imp_mean)]<-mean(x_imp_mean,na.rm=TRUE)
+x_miss_index<-1*is.na(x_imp_mean)
+```
+
+New category for the missing value
+```{r}
+x_cat<- sample(c("A","B","C"),100,TRUE)
+x_cat[sample(1:100,10)]<-NA
+x_cat_imp<-x_cat
+x_cat_imp[is.na(x_cat_imp)]<-"D"
+```
+
+
+### Random Imputation
+
+#### Simple random imputation
+Take a random sample from the observed values and impute.
+
+```{r}
+random.imp <- function (a){
+	missing <- is.na(a)
+	n.missing <- sum(missing)
+	a.obs <- a[!missing]
+	imputed <- a
+	imputed[missing] <- sample (a.obs, n.missing, replace=TRUE)
+	return (imputed)
+}
+x_imp_rand_simple<-random.imp(xmiss)
+
+
+```
+#### Regression based imputation
+
+Fit regression model on the observed and impute the predicted value.
+- Deterministic: Use the predicted value
+- Random: Add random noise
+```{r,fig.width=12,fig.height=4}
+x <- rnorm(100)
+y <- 1+1.4*x+rnorm(100)
+ymiss<-y
+ymiss[sample(1:100,10)]<-NA
+lm.fit.model<-lm(ymiss~x)
+y_imp_det <-ymiss
+y_imp_det[is.na(y_imp_det)]<- predict (lm.fit.model,newdata=data.frame(x=x[is.na(ymiss)]))
+y_imp_rand <-ymiss
+y_imp_rand[is.na(y_imp_rand)]<- rnorm (sum(is.na(ymiss)), predict (lm.fit.model,newdata=data.frame(x=x[is.na(ymiss)])), sigma.hat (lm.fit.model))
+par(mfrow=c(1,3))
+plot(x,y,col=1+1*is.na(ymiss),pch=19,main="Original")
+plot(x,y_imp_det,col=1+1*is.na(ymiss),pch=19,main="Deterministic")
+plot(x,y_imp_rand,col=1+1*is.na(ymiss),pch=19,main="Random")
+
+```
+
+#### Iterative imputation
+
+Regression based imputation can be repeated many times to update the imputation.
+```{r}
+x1<-rnorm(100)
+x2<-rnorm(100)
+y12<-1+1.4*x1-0.4*x2+rnorm(100)
+y12miss     <- y12
+x1miss      <- x1
+x2miss      <- x2
+x1miss[1:10] <-NA
+x2miss[11:20]<-NA
+y12miss[5:15]<-NA
+
+rand.reg.imp <- function (dat.y, dat.x){
+	missing <- is.na(dat.y)
+	n.missing <- sum(missing)
+	dat.y.obs <- dat.y[!missing]
+	imputed <- dat.y
+	lm.fit.model <- lm(dat.y~.,data.frame(dat.y,dat.x))
+	imputed[missing] <- rnorm (n.missing, 
+	                           predict (lm.fit.model,newdata=data.frame(dat.x[missing,])), 
+	                           sigma.hat (lm.fit.model))
+	return (imputed)
+}
+
+misdat<-data.frame(y=y12miss,x1=x1miss,x2=x2miss)
+fildat<-apply(misdat,2,random.imp)
+for(j in 1:100){
+  for(i in 1:3){
+    fildat[,i]<-rand.reg.imp(misdat[,i],fildat[,-i])
+  }
+}
+
+```
+
+### Multiple imputation
+
+
+Multiple imputation is a way of imputing multiple times to account for the uncertainty in the imputation.
+
+### mi
+
+`mi` has been my personal favorite since I was the original developer. It uses multiple imputations using chained equations.  This was the first package that thought carefully about diagnostics and convergence of the multiple imputations.
+
+```{r}
+mdf <- missing_data.frame(misdat)
+imp_mi <- mi(mdf, seed = 335)
+summary(imp_mi)
+mi_compdat<-mi:::complete(imp_mi,2)
+plot(imp_mi)
+```
+
+### mice
+
+Mice is considered the most used software in this space.  It predates mi, but it copied many functions from mi and is very similar to mi.
+
+```{r}
+library(mice)
+imp_mice <- mice(misdat, m=5, maxit = 50, method = 'pmm', seed = 500)
+imp_mice$imp # Imputed values
+comp_mice <- complete(imp_mice,2) # Filled in matrix
+```
+
+### Machine Learning Imputation
+
+Machine learning based imputation is pretty popular nowadays. `missForest` is one example of using a random forest algorithm for imputation.
+
+#### missForest
+
+```{r}
+library(missForest)
+imp_forest<- missForest(misdat)
+```
+
+### Timeseries
+
+We will not go too much into time series imputation, but it also comes up fairly frequently.
+
+#### `imputeTS`
+
+More information can be found here: https://cran.rstudio.com/web/packages/imputeTS/vignettes/Cheat_Sheet_imputeTS.pdf
+
+```{r}
+library("imputeTS")
+ggplot_na_distribution(tsAirgap)
+imp <- na_kalman(tsAirgap)
+ggplot_na_imputations(tsAirgap, imp)
+```
+
